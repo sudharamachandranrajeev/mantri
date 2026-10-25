@@ -10,11 +10,22 @@ unit=~/.config/systemd/user/mantri.service
 fresh=0; [[ -f $unit ]] || fresh=1
 mkdir -p "$share" ~/.local/bin ~/.config/systemd/user
 [[ -x $share/venv/bin/python ]] || python3 -m venv "$share/venv"
-"$share/venv/bin/pip" install -q --upgrade faster-whisper
+"$share/venv/bin/pip" install -q --upgrade faster-whisper sherpa-onnx
 
 install -m 755 "$here/mantri.py" "$share/mantri.py"
-install -m 755 "$here/mantri-command" "$here/mantri-toggle" ~/.local/bin/
+install -m 755 "$here/mantri-command" "$here/mantri-toggle" "$here/mantri-enroll" ~/.local/bin/
 install -m 644 "$here/mantri.service" ~/.config/systemd/user/mantri.service
+
+# Models (sherpa-onnx releases): WeSpeaker CAM++ for voice recognition (28 MB),
+# Kokoro int8 for talk back (126 MB). Both Apache-2.0.
+models=$share/models
+releases=https://github.com/k2-fsa/sherpa-onnx/releases/download
+mkdir -p "$models"
+[[ -f $models/wespeaker_en_voxceleb_CAM++_LM.onnx ]] ||
+  curl -fL --progress-bar -o "$models/wespeaker_en_voxceleb_CAM++_LM.onnx" \
+    "$releases/speaker-recongition-models/wespeaker_en_voxceleb_CAM++_LM.onnx"
+[[ -f $models/kokoro-int8-multi-lang-v1_0/model.int8.onnx ]] ||
+  curl -fL --progress-bar "$releases/tts-models/kokoro-int8-multi-lang-v1_0.tar.bz2" | tar xj -C "$models"
 
 # Fetch the Whisper model now rather than on first wake.
 "$share/venv/bin/python" -c 'from faster_whisper import WhisperModel; WhisperModel("base.en", device="cpu", compute_type="int8")' 2>/dev/null

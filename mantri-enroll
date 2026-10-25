@@ -1,0 +1,5 @@
+#!/bin/bash
+# Teach Mantri a voice so it obeys only enrolled people:  mantri-enroll NAME
+# Run once per person in a terminal; rerun to re-record. Remove a voice with
+#   rm ~/.local/share/mantri/voices/NAME.npy && systemctl --user restart mantri
+exec ~/.local/share/mantri/venv/bin/python ~/.local/share/mantri/mantri.py --enroll "${1:-me}"

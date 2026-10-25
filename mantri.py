@@ -5,26 +5,31 @@ Say "Mantri, open firefox" (or "Mantri", wait for the chime, then the command).
 
 Pipeline, fully local:
   mic -> Silero VAD cuts speech into utterances -> Whisper transcribes each
-  one -> only a sentence that begins with the wake word is run through
-  `mantri-command`.
+  one -> only a sentence that begins with the wake word goes on -> if voices
+  are enrolled, the speaker must match one -> `mantri-command` runs it ->
+  its reply is spoken with Kokoro TTS.
 
 Nothing is acted on, and no chime or notification fires, unless Whisper
 actually heard the wake word. The previous openWakeWord "hey jarvis" model
 fired on ordinary speech and TV audio, which this design avoids.
 
   mantri.py                 listen on the microphone (the systemd service)
+  mantri.py --enroll NAME   record NAME's voice so Mantri obeys only enrolled voices
   mantri.py --file a.wav    run the pipeline over a 16 kHz mono WAV and print
-                            what would happen (for testing and tuning)
+                            what would happen, with speaker scores (calibration)
+  mantri.py --say "text"    speak text with the talk-back voice
 """
 
 import argparse
 import collections
+import glob
 import os
 import queue
 import re
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import wave
@@ -44,17 +49,40 @@ END_SILENCE_SECS = 0.7      # silence that ends an utterance
 MIN_SPEECH_SECS = 0.25      # ignore clicks and coughs
 MAX_UTTERANCE_SECS = 8.0    # hard cap, then the utterance is cut (keeps TV audio cheap)
 COMMAND_WAIT_SECS = 5.0     # after a bare "Mantri", how long to wait for the command
+# Voice recognition: cosine similarity to an enrolled voiceprint needed to obey.
+# Uncalibrated default; check the "speaker" scores in the journal and tune.
+SPEAKER_THRESHOLD = float(os.environ.get("MANTRI_SPEAKER_THRESHOLD", "0.5"))
+# Talk back: Kokoro voice id (21 = bf_emma, British female; 26 = bm_george) and speed.
+TALKBACK = os.environ.get("MANTRI_TALKBACK", "1") != "0"
+VOICE_SID = int(os.environ.get("MANTRI_VOICE_SID", "21"))
+VOICE_SPEED = float(os.environ.get("MANTRI_VOICE_SPEED", "1.1"))
 COMMAND_HANDLER = os.path.expanduser("~/.local/bin/mantri-command")
 CHIME = "/usr/share/sounds/freedesktop/stereo/message.oga"
 # Always listen on the built-in mic. Recording from a Bluetooth headset forces it
 # into HFP (call) mode, which breaks A2DP playback on the "Both Headphones" sink.
 MIC_SOURCE = os.environ.get("MANTRI_MIC_SOURCE", "alsa_input.pci-0000_00_1f.3.analog-stereo")
+DATA = os.path.expanduser("~/.local/share/mantri")
+MODELS = os.path.join(DATA, "models")
+VOICES = os.path.join(DATA, "voices")  # enrolled voiceprints, one NAME.npy each
+SPEAKER_MODEL = os.path.join(MODELS, "wespeaker_en_voxceleb_CAM++_LM.onnx")
+KOKORO = os.path.join(MODELS, "kokoro-int8-multi-lang-v1_0")
 # ---------------------------------------------------------------------------
 
 RATE = 16000
 FRAME = 512  # 32 ms, the Silero VAD window
 FRAME_SECS = FRAME / RATE
 PRE_ROLL_FRAMES = int(0.3 / FRAME_SECS)
+
+ENROLL_PHRASES = [
+    "Mantri, open Firefox.",
+    "Mantri, what time is it?",
+    "Hey Mantri, volume up.",
+    "Mantri, next song.",
+    "Mantri, search for the weather in Belfast.",
+    "Mantri, move this window to workspace three.",
+    "Mantri, take a screenshot.",
+    "Mantri, lock the screen.",
+]
 
 
 def log(*args):
@@ -103,29 +131,37 @@ class Vad:
         return float(out.reshape(-1)[0])
 
 
-def utterances(frames, vad):
-    """Group a stream of float32 frames into speech utterances (numpy arrays)."""
-    pre_roll = collections.deque(maxlen=PRE_ROLL_FRAMES)
-    current, silent, speech = None, 0.0, 0.0
-    for frame in frames:
-        p = vad(frame)
-        if current is None:
-            pre_roll.append(frame)
+class Segmenter:
+    """Groups float32 frames into speech utterances; feed() returns one when it ends."""
+
+    def __init__(self):
+        self.vad = Vad()
+        self.reset()
+
+    def reset(self):
+        self.vad.reset()
+        self.pre_roll = collections.deque(maxlen=PRE_ROLL_FRAMES)
+        self.current, self.silent, self.speech = None, 0.0, 0.0
+
+    def feed(self, frame):
+        p = self.vad(frame)
+        if self.current is None:
+            self.pre_roll.append(frame)
             if p >= VAD_START:
-                current, silent, speech = list(pre_roll), 0.0, 0.0
-                pre_roll.clear()
-            continue
-        current.append(frame)
+                self.current, self.silent, self.speech = list(self.pre_roll), 0.0, 0.0
+                self.pre_roll.clear()
+            return None
+        self.current.append(frame)
         if p >= VAD_END:
-            silent = 0.0
-            speech += FRAME_SECS
+            self.silent = 0.0
+            self.speech += FRAME_SECS
         else:
-            silent += FRAME_SECS
-        if silent >= END_SILENCE_SECS or len(current) * FRAME_SECS >= MAX_UTTERANCE_SECS:
-            if speech >= MIN_SPEECH_SECS:
-                yield np.concatenate(current)
-            current = None
-            vad.reset()
+            self.silent += FRAME_SECS
+        if self.silent >= END_SILENCE_SECS or len(self.current) * FRAME_SECS >= MAX_UTTERANCE_SECS:
+            audio = np.concatenate(self.current) if self.speech >= MIN_SPEECH_SECS else None
+            self.reset()
+            return audio
+        return None
 
 
 class Transcriber:
@@ -138,9 +174,63 @@ class Transcriber:
             audio, language="en", beam_size=1, condition_on_previous_text=False,
             without_timestamps=True, vad_filter=False,
             # Teaches Whisper the spelling; without it "Mantri" comes out as
-            # Mountree, Maundry, Mentory... (see tests/README.md).
+            # Mountree, Maundry, Mentory... (see README).
             initial_prompt="Mantri, open Firefox. Hey Mantri, volume up.")
         return " ".join(s.text.strip() for s in segments).strip()
+
+
+class Speakers:
+    """Voice recognition: compares an utterance with the enrolled voiceprints
+    (WeSpeaker CAM++ speaker embeddings, cosine similarity)."""
+
+    def __init__(self):
+        import sherpa_onnx
+        self.extractor = sherpa_onnx.SpeakerEmbeddingExtractor(
+            sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=SPEAKER_MODEL, num_threads=2))
+        self.voices = {}
+        for path in sorted(glob.glob(os.path.join(VOICES, "*.npy"))):
+            self.voices[os.path.basename(path)[:-4]] = np.load(path)
+
+    def embed(self, audio):
+        stream = self.extractor.create_stream()
+        stream.accept_waveform(RATE, audio)
+        stream.input_finished()
+        e = np.array(self.extractor.compute(stream), dtype=np.float32)
+        return e / (np.linalg.norm(e) or 1.0)
+
+    def identify(self, audio):
+        """Best (name, score) among enrolled voices, or (None, 0.0) if none enrolled."""
+        if not self.voices:
+            return None, 0.0
+        e = self.embed(audio)
+        return max(((name, float(e @ v)) for name, v in self.voices.items()), key=lambda x: x[1])
+
+
+class Voice:
+    """Talk back with Kokoro TTS (sherpa-onnx), played on the default output."""
+
+    def __init__(self):
+        import sherpa_onnx
+        k = KOKORO
+        self.tts = sherpa_onnx.OfflineTts(sherpa_onnx.OfflineTtsConfig(
+            model=sherpa_onnx.OfflineTtsModelConfig(
+                kokoro=sherpa_onnx.OfflineTtsKokoroModelConfig(
+                    model=f"{k}/model.int8.onnx", voices=f"{k}/voices.bin", tokens=f"{k}/tokens.txt",
+                    lexicon=f"{k}/lexicon-gb-en.txt", data_dir=f"{k}/espeak-ng-data",
+                    dict_dir=f"{k}/dict", lang="en-gb"),
+                num_threads=4)))
+
+    def say(self, text):
+        audio = self.tts.generate(text, sid=VOICE_SID, speed=VOICE_SPEED)
+        with tempfile.NamedTemporaryFile(suffix=".wav") as f:
+            with wave.open(f.name, "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(audio.sample_rate)
+                pcm = np.clip(np.asarray(audio.samples), -1, 1)
+                w.writeframes((pcm * 32767).astype(np.int16).tobytes())
+            subprocess.run(["pw-play", "-P", "media.name=mantri", f.name],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def words(text):
@@ -180,15 +270,29 @@ def split_wake(text):
     return None
 
 
-class Assistant:
-    """Turns utterances into actions. `run` is what happens to a recognised command."""
+def run_command(command):
+    """Run mantri-command; lines it prints as "SPEAK: ..." are the reply to say."""
+    log(f"Run: {command!r}")
+    out = subprocess.run([COMMAND_HANDLER, command], capture_output=True, text=True).stdout
+    return " ".join(l[6:].strip() for l in out.splitlines() if l.startswith("SPEAK:"))
 
-    def __init__(self, transcribe, run):
+
+class Assistant:
+    """Turns utterances into actions.
+
+    `run(command) -> reply` executes a recognised command, `speak(text)` talks
+    back, and `speakers` (optional) gates commands on an enrolled voice."""
+
+    def __init__(self, transcribe, run, speak=None, speakers=None):
         self.transcribe = transcribe
         self.run = run
+        self.speak = speak
+        self.speakers = speakers
         self.awaiting_until = 0.0
+        self.awaiting_name = None
 
     def handle(self, audio, now):
+        """Process one utterance. Returns True if Mantri made a sound."""
         awaiting = now < self.awaiting_until
         self.awaiting_until = 0.0
         text = self.transcribe(audio)
@@ -197,31 +301,50 @@ class Assistant:
             # The utterance after a bare "Mantri" is the command itself.
             command = " ".join(words(re.split(r"[.!?]+", text)[0]))
         if command is None:
-            return  # ordinary speech: ignore silently, log nothing that was said
-        log(f"Heard: {text!r}")
+            return False  # ordinary speech: ignore silently, log nothing that was said
+
+        name = self.awaiting_name if awaiting else None
+        if self.speakers and self.speakers.voices and name is None:
+            name, score = self.speakers.identify(audio)
+            ok = score >= SPEAKER_THRESHOLD
+            log(f"Heard: {text!r}  speaker {name} {score:.2f} {'ok' if ok else 'REJECTED'}")
+            if not ok:
+                return False  # someone else, or the TV, said "Mantri"
+        else:
+            log(f"Heard: {text!r}")
+
         if command:
-            self.run(command, text)
-            return
+            reply = self.run(command)
+            if reply and self.speak:
+                self.speak(reply)
+                return True
+            return False
         # Bare wake word: chime and take the next utterance as the command.
         self.awaiting_until = now + COMMAND_WAIT_SECS
+        self.awaiting_name = name
         chime()
         notify("🎙 Mantri", "Listening…", int(COMMAND_WAIT_SECS * 1000))
+        return True
 
 
-def mic_frames(stop):
-    """Yield float32 frames from the mic; a reader thread keeps the pipe drained
+class Mic:
+    """Float32 frames from pw-record. A reader thread keeps the pipe drained
     while Whisper is busy so audio is never dropped."""
-    q = queue.Queue(maxsize=int(30 / FRAME_SECS))
 
-    def reader():
-        while not stop.is_set():
+    def __init__(self, stop):
+        self.stop = stop
+        self.q = queue.Queue(maxsize=int(30 / FRAME_SECS))
+        threading.Thread(target=self._reader, daemon=True).start()
+
+    def _reader(self):
+        while not self.stop.is_set():
             mic = subprocess.Popen(
                 ["pw-record", "--rate", str(RATE), "--channels", "1", "--format", "s16",
                  "--target", MIC_SOURCE, "-P", "media.name=mantri", "-"],
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
             try:
                 buf = b""
-                while not stop.is_set():
+                while not self.stop.is_set():
                     part = mic.stdout.read(FRAME * 2 - len(buf))
                     if not part:
                         break
@@ -230,25 +353,51 @@ def mic_frames(stop):
                         frame = np.frombuffer(buf, dtype=np.int16).astype(np.float32) / 32768
                         buf = b""
                         try:
-                            q.put_nowait(frame)
+                            self.q.put_nowait(frame)
                         except queue.Full:
                             pass
             finally:
                 mic.terminate()
                 mic.wait()
-            if not stop.is_set():
+            if not self.stop.is_set():
                 log("Mic stream ended; reopening")
                 time.sleep(1)
-        q.put(None)
+        self.q.put(None)
 
-    threading.Thread(target=reader, daemon=True).start()
-    while (frame := q.get()) is not None:
-        yield frame
+    def flush(self):
+        """Drop audio captured so far (e.g. Mantri's own voice or chime)."""
+        while True:
+            try:
+                self.q.get_nowait()
+            except queue.Empty:
+                return
+
+    def __iter__(self):
+        while (frame := self.q.get()) is not None:
+            yield frame
 
 
-def run_command(command, heard):
-    log(f"Run: {command!r}")
-    subprocess.run([COMMAND_HANDLER, command])
+def load_voice():
+    if not TALKBACK:
+        return None
+    try:
+        return Voice()
+    except Exception as e:  # missing model: keep working, just silently
+        log(f"Talk back off: {e}")
+        return None
+
+
+def load_speakers():
+    try:
+        speakers = Speakers()
+    except Exception as e:
+        log(f"Voice recognition off: {e}")
+        return None
+    if speakers.voices:
+        log(f"Voice recognition on: {', '.join(speakers.voices)} (threshold {SPEAKER_THRESHOLD})")
+    else:
+        log("Voice recognition off: no voices enrolled (mantri-enroll NAME)")
+    return speakers
 
 
 def listen():
@@ -260,13 +409,55 @@ def listen():
     signal.signal(signal.SIGTERM, on_signal)
     signal.signal(signal.SIGINT, on_signal)
 
-    assistant = Assistant(Transcriber(), run_command)
+    voice = load_voice()
+    assistant = Assistant(Transcriber(), run_command, voice.say if voice else None, load_speakers())
+    mic, segmenter = Mic(stop), Segmenter()
     log(f"Listening for '{WAKE_WORD}' on {MIC_SOURCE} (whisper {WHISPER_MODEL})")
-    for audio in utterances(mic_frames(stop), Vad()):
-        assistant.handle(audio, time.monotonic())
+    for frame in mic:
+        audio = segmenter.feed(frame)
+        if audio is not None and assistant.handle(audio, time.monotonic()):
+            time.sleep(0.3)  # let the chime or reply tail off before listening again
+            mic.flush()
+            segmenter.reset()
         if stop.is_set():
             break
     log("Stopped")
+
+
+def enroll(name):
+    """Record the user saying a few commands and save their averaged voiceprint."""
+    if subprocess.run(["systemctl", "--user", "is-active", "--quiet", "mantri"]).returncode == 0:
+        sys.exit("Turn Mantri off first (mantri-toggle off) so it doesn't act on these phrases.")
+    speakers = Speakers()
+    stop = threading.Event()
+    mic, segmenter = Mic(stop), Segmenter()
+    print(f"Enrolling '{name}'. Speak normally from where you usually sit.\n")
+    embeddings = []
+    for n, phrase in enumerate(ENROLL_PHRASES, 1):
+        input(f"[{n}/{len(ENROLL_PHRASES)}] Press Enter, then say:  {phrase}")
+        mic.flush()
+        segmenter.reset()
+        deadline = time.monotonic() + 10
+        audio = None
+        for frame in mic:
+            audio = segmenter.feed(frame)
+            if audio is not None or time.monotonic() > deadline:
+                break
+        if audio is None:
+            print("   didn't hear anything, skipping")
+            continue
+        embeddings.append(speakers.embed(audio))
+        print(f"   got {len(audio) / RATE:.1f}s")
+    stop.set()
+    if len(embeddings) < 3:
+        sys.exit("Too few phrases recorded; nothing saved.")
+    voiceprint = np.mean(embeddings, axis=0)
+    voiceprint /= np.linalg.norm(voiceprint)
+    os.makedirs(VOICES, exist_ok=True)
+    np.save(os.path.join(VOICES, f"{name}.npy"), voiceprint)
+    print(f"\nSaved {len(embeddings)} samples to {VOICES}/{name}.npy")
+    print("Self-match per phrase (calibration):", " ".join(f"{float(e @ voiceprint):.2f}" for e in embeddings))
+    print("Turn Mantri back on with: mantri-toggle on")
 
 
 def from_file(path):
@@ -275,27 +466,38 @@ def from_file(path):
             sys.exit(f"{path}: need 16 kHz mono 16-bit WAV")
         pcm = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16).astype(np.float32) / 32768
     pcm = np.concatenate([pcm, np.zeros(int(2 * RATE), dtype=np.float32)])  # flush the last utterance
-    frames = (pcm[i:i + FRAME] for i in range(0, len(pcm) - FRAME + 1, FRAME))
 
     transcribe = Transcriber()
-
-    def show(command, heard):
-        print(f"RUN {command!r}  (heard {heard!r})", flush=True)
 
     def traced(audio):
         text = transcribe(audio)
         print(f"  utterance {len(audio) / RATE:.1f}s -> {text!r}", flush=True)
         return text
 
-    assistant = Assistant(traced, show)
-    t = 0.0
-    for audio in utterances(frames, Vad()):
-        t += len(audio) / RATE
-        assistant.handle(audio, t)
+    def show(command):
+        print(f"RUN {command!r}", flush=True)
+        return ""
+
+    assistant = Assistant(traced, show, speakers=load_speakers())
+    segmenter, t = Segmenter(), 0.0
+    for i in range(0, len(pcm) - FRAME + 1, FRAME):
+        t += FRAME_SECS
+        audio = segmenter.feed(pcm[i:i + FRAME])
+        if audio is not None:
+            assistant.handle(audio, t)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--file", help="process a 16 kHz mono WAV instead of the microphone")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--file", help="process a 16 kHz mono WAV instead of the microphone")
+    group.add_argument("--enroll", metavar="NAME", help="record and save NAME's voiceprint")
+    group.add_argument("--say", metavar="TEXT", help="speak TEXT with the talk-back voice")
     args = parser.parse_args()
-    sys.exit(from_file(args.file) if args.file else listen())
+    if args.file:
+        sys.exit(from_file(args.file))
+    if args.enroll:
+        sys.exit(enroll(re.sub(r"[^A-Za-z0-9_-]", "", args.enroll) or "me"))
+    if args.say:
+        sys.exit(Voice().say(args.say))
+    sys.exit(listen())

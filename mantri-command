@@ -5,7 +5,15 @@
 
 SEARCH_URL="https://www.google.com/search?q="
 
-say() { notify-send -a "Mantri" -t 2500 -h string:x-canonical-private-synchronous:mantri "$@"; }
+# Show a notification; its title is also spoken back. "SPEAK:" lines on stdout
+# are read aloud by the daemon (talk back), so keep other output off stdout.
+say() {
+  local args=("$@") i=0
+  [[ ${args[0]} == -t ]] && i=2
+  echo "SPEAK: ${args[$i]}"
+  notify-send -a "Mantri" -t 2500 -h string:x-canonical-private-synchronous:mantri "$@"
+}
+speak() { echo "SPEAK: $*"; }
 dispatch() { hyprctl dispatch "$1" >/dev/null; }
 run() { setsid -f "$@" >/dev/null 2>&1; }
 
@@ -114,10 +122,25 @@ case "$text" in
     q=$(echo "$text" | sed -E 's/^(search for|search|google|look up) //')
     run omarchy-launch-browser "$SEARCH_URL$(jq -rn --arg q "$q" '$q|@uri')"
     say "Searching for \"$q\"" ;;
+  # --- Questions (answered aloud) -------------------------------------------
+  "what time is it"|"what's the time"|"what is the time"|"time"|"tell me the time")
+    say "It's $(date '+%-I:%M %p')" ;;
+  "what's the date"|"what is the date"|"what day is it"|"what's today"|"date"|"today's date")
+    say "It's $(date '+%A, %-d %B')" ;;
+  "battery"|"how's the battery"|"battery level"|"what's the battery"|"how much battery")
+    bat=$(cat /sys/class/power_supply/BAT*/capacity 2>/dev/null | head -1)
+    state=$(cat /sys/class/power_supply/BAT*/status 2>/dev/null | head -1 | tr '[:upper:]' '[:lower:]')
+    [[ -n $bat ]] && say "Battery is at $bat percent, $state" || say "No battery found" ;;
+  "hello"|"hi"|"are you there"|"you there")
+    say "Yes, I'm listening" ;;
+  "thank you"|"thanks")
+    speak "You're welcome" ;;
+
   "help"|"what can you do"|"commands")
-    say -t 10000 "Voice commands" "open <app> · close window · fullscreen · workspace N · move to workspace N
+    speak "I can open apps, manage windows and workspaces, control media, volume and brightness, tell the time, and search the web."
+    notify-send -a "Mantri" -t 10000 -h string:x-canonical-private-synchronous:mantri "Voice commands" "open <app> · close window · fullscreen · workspace N · move to workspace N
 volume up/down · mute · play/pause · next · brightness up/down
-lock · screenshot · search for … · shut down / reboot / suspend" ;;
+lock · screenshot · search for … · time · date · battery · shut down / reboot / suspend" ;;
 
   *)
     say "Didn't understand" "\"$raw\"" ;;
