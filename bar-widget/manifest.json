@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "id": "rajeevrama.mantri",
+  "name": "Mantri",
+  "version": "1.0.0",
+  "author": "rajeevrama",
+  "description": "Turns Mantri always-listening voice control on and off",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Widget.qml"
+  },
+  "barWidget": {
+    "displayName": "Mantri",
+    "description": "Toggle Mantri voice control (releases the microphone when off)",
+    "category": "Audio",
+    "aliases": [
+      "voice",
+      "microphone",
+      "assistant"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

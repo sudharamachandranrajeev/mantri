@@ -1,0 +1,15 @@
+[Unit]
+Description=Mantri always-listening voice control
+After=pipewire.service graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=%h/.local/share/mantri/venv/bin/python %h/.local/share/mantri/mantri.py
+Environment=PATH=%h/.local/bin:/usr/share/omarchy/bin:/usr/local/bin:/usr/bin
+Environment=OMARCHY_PATH=/usr/share/omarchy
+Restart=on-failure
+RestartSec=3
+Nice=5
+
+[Install]
+WantedBy=graphical-session.target

@@ -1,0 +1,124 @@
+#!/bin/bash
+# Run a spoken command. Called by the Mantri daemon with the transcript:
+#   mantri-command "open firefox"
+# Add your own phrases in the case statement below.
+
+SEARCH_URL="https://www.google.com/search?q="
+
+say() { notify-send -a "Mantri" -t 2500 -h string:x-canonical-private-synchronous:mantri "$@"; }
+dispatch() { hyprctl dispatch "$1" >/dev/null; }
+run() { setsid -f "$@" >/dev/null 2>&1; }
+
+confirm() {
+  [[ $(omarchy-menu-select "$1" "Yes" "No" 2>/dev/null) == "Yes" ]]
+}
+
+# Turn spoken numbers into digits ("workspace three" -> "workspace 3").
+to_number() {
+  case "$1" in
+    one|won) echo 1 ;; two|to|too) echo 2 ;; three) echo 3 ;; four|for) echo 4 ;;
+    five) echo 5 ;; six) echo 6 ;; seven) echo 7 ;; eight) echo 8 ;;
+    nine) echo 9 ;; ten) echo 10 ;; *) echo "$1" ;;
+  esac
+}
+
+# Launch an installed app by its desktop-entry name ("open spotify").
+launch_app() {
+  local name="$1" file
+  for exact in 1 0; do
+    while IFS= read -r file; do
+      local app_name
+      app_name=$(sed -n 's/^Name=//p' "$file" | head -1 | tr '[:upper:]' '[:lower:]')
+      if { (( exact )) && [[ $app_name == "$name" ]]; } || { (( ! exact )) && [[ $app_name == *"$name"* ]]; }; then
+        grep -q '^NoDisplay=true' "$file" && continue
+        run uwsm-app -- "$(basename "$file")"
+        say "Opening $(sed -n 's/^Name=//p' "$file" | head -1)"
+        return 0
+      fi
+    done < <(find ~/.local/share/applications /usr/share/applications /var/lib/flatpak/exports/share/applications \
+                  -name '*.desktop' 2>/dev/null)
+  done
+  return 1
+}
+
+raw="$*"
+# Normalize: lowercase, drop punctuation, a leftover wake word, and politeness.
+text=$(echo "$raw" | tr '[:upper:]' '[:lower:]' | sed -E "s/[^a-z0-9' ]+/ /g; s/ +/ /g; s/^ //; s/ $//")
+text=$(echo "$text" | sed -E 's/^(hey )?mantri //; s/^(can you|could you|please) //; s/ please$//')
+
+case "$text" in
+  # --- Apps & windows -------------------------------------------------------
+  "open browser"|"open the browser"|"open web browser"|"launch browser")
+    run omarchy-launch-browser; say "Opening browser" ;;
+  "open terminal"|"open a terminal"|"open the terminal"|"new terminal")
+    run omarchy-launch-terminal; say "Opening terminal" ;;
+  "open files"|"open file manager"|"open the file manager"|"open nautilus")
+    run omarchy-launch-nautilus; say "Opening files" ;;
+  "open spotify"|"play spotify")
+    run omarchy-launch-spotify; say "Opening Spotify" ;;
+  open\ *|launch\ *|start\ *)
+    app=${text#* }; app=${app#the }
+    launch_app "$app" || say "Couldn't find an app called \"$app\"" ;;
+
+  "close window"|"close this window"|"close this"|"close it"|"kill window")
+    dispatch 'hl.dsp.window.close()'; say "Closed window" ;;
+  "full screen"|"fullscreen"|"toggle full screen"|"maximize"|"maximize window")
+    dispatch 'hl.dsp.window.fullscreen({ mode = "fullscreen" })' ;;
+  "float"|"float window"|"toggle floating"|"tile window")
+    dispatch 'hl.dsp.window.float({ action = "toggle" })' ;;
+  "next workspace")
+    dispatch 'hl.dsp.focus({ workspace = "e+1" })' ;;
+  "previous workspace"|"last workspace")
+    dispatch 'hl.dsp.focus({ workspace = "e-1" })' ;;
+  "workspace "*|"go to workspace "*|"switch to workspace "*)
+    n=$(to_number "${text##* }")
+    [[ $n =~ ^[0-9]+$ ]] && dispatch "hl.dsp.focus({ workspace = \"$n\" })" || say "Which workspace?" ;;
+  "move to workspace "*|"move window to workspace "*|"send to workspace "*)
+    n=$(to_number "${text##* }")
+    [[ $n =~ ^[0-9]+$ ]] && dispatch "hl.dsp.window.move({ workspace = \"$n\" })" || say "Which workspace?" ;;
+
+  # --- Media & system -------------------------------------------------------
+  "volume up"|"louder"|"turn it up"|"turn up the volume"|"increase volume")
+    omarchy-audio-output-volume +10 ;;
+  "volume down"|"quieter"|"turn it down"|"turn down the volume"|"decrease volume"|"lower volume")
+    omarchy-audio-output-volume -10 ;;
+  "mute"|"unmute"|"toggle mute"|"mute volume"|"mute sound")
+    omarchy-audio-output-volume mute-toggle ;;
+  "pause"|"play"|"resume"|"pause music"|"play music"|"resume music"|"stop music")
+    omarchy-shell media playPause ;;
+  "next"|"next track"|"next song"|"skip"|"skip song")
+    omarchy-shell media next ;;
+  "previous"|"previous track"|"previous song"|"go back"|"last song")
+    omarchy-shell media previous ;;
+  "brightness up"|"brighter"|"increase brightness")
+    omarchy-brightness-display +15% ;;
+  "brightness down"|"dimmer"|"darker"|"decrease brightness"|"lower brightness")
+    omarchy-brightness-display 15%- ;;
+  "lock"|"lock screen"|"lock the screen"|"lock computer")
+    omarchy-system-lock ;;
+  "screenshot"|"take a screenshot"|"take screenshot"|"screen shot")
+    omarchy-capture-screenshot fullscreen ;;
+
+  # --- Power (always confirms) ---------------------------------------------
+  "shut down"|"shutdown"|"power off"|"turn off computer"|"turn off the computer")
+    confirm "Shut down?" && omarchy-system-shutdown ;;
+  "reboot"|"restart"|"restart computer"|"restart the computer")
+    confirm "Reboot?" && omarchy-system-reboot ;;
+  "suspend"|"sleep"|"go to sleep")
+    confirm "Suspend?" && systemctl suspend ;;
+  "log out"|"logout"|"sign out")
+    confirm "Log out?" && omarchy-system-logout ;;
+
+  # --- Search & help ---------------------------------------------------------
+  "search for "*|"search "*|"google "*|"look up "*)
+    q=$(echo "$text" | sed -E 's/^(search for|search|google|look up) //')
+    run omarchy-launch-browser "$SEARCH_URL$(jq -rn --arg q "$q" '$q|@uri')"
+    say "Searching for \"$q\"" ;;
+  "help"|"what can you do"|"commands")
+    say -t 10000 "Voice commands" "open <app> · close window · fullscreen · workspace N · move to workspace N
+volume up/down · mute · play/pause · next · brightness up/down
+lock · screenshot · search for … · shut down / reboot / suspend" ;;
+
+  *)
+    say "Didn't understand" "\"$raw\"" ;;
+esac

@@ -1,0 +1,15 @@
+#!/bin/bash
+# Turn Mantri on or off. Off stops listening, releases the microphone and
+# stays off after reboot; on starts it and enables it at login.
+#   mantri-toggle [on|off]
+state=${1:-}
+if [[ -z $state ]]; then
+  systemctl --user is-active --quiet mantri && state=off || state=on
+fi
+if [[ $state == off ]]; then
+  systemctl --user disable --now mantri 2>/dev/null
+  notify-send -a "Mantri" -t 2000 "🔇 Mantri off" "Microphone released"
+else
+  systemctl --user enable --now mantri 2>/dev/null
+  notify-send -a "Mantri" -t 2000 "🎙 Mantri listening" "Say \"Mantri, open firefox\""
+fi
