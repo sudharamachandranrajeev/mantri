@@ -43,9 +43,9 @@ match and score for every wake, so you can calibrate from real use.
 | Speaker model | WeSpeaker CAM++ LM: 28 MB, fast. CAM++ beats ECAPA-TDNN and ResNet34 at half the parameters | ResNet293 is about 0.1 % EER better and many times slower. TitaNet-large is 96 MB |
 | TTS | Kokoro-82M: best open quality at this size, Apache-2.0 code and weights | Piper is faster but sounds more robotic, and the current piper1-gpl is GPL-3.0. Kitten is smaller and lower quality |
 
-## Why this replaced "Hey Jarvis"
+## Why this replaced the old wake-word model
 
-The first version used openWakeWord's pretrained `hey_jarvis` model at threshold 0.5, then
+The first version used a pretrained openWakeWord model at threshold 0.5, then
 recorded up to 7 s and transcribed it. Its logs from three weeks, 2026-10-04 to 2026-10-25, show
 why it never worked:
 

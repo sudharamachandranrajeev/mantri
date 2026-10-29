@@ -4,7 +4,7 @@
   <br>
 </h1>
 
-<h4 align="center">Talk to your Omarchy computer. Say "Mantri, open Firefox" and it does, all on your own machine.</h4>
+<h4 align="center">Talk to your Omarchy computer. Say "Mantri, open the browser" and it does, all on your own machine.</h4>
 
 <p align="center">
   <img src="https://img.shields.io/badge/works%20on-Omarchy%20(Arch%20%2B%20Hyprland)-555" alt="Works on Omarchy (Arch + Hyprland)">
@@ -22,7 +22,7 @@
 
 <table align="center">
   <tr><td><b>You say</b></td><td><b>Mantri does</b></td></tr>
-  <tr><td>"Mantri, open Firefox"</td><td>Opens Firefox and says "Opening Firefox"</td></tr>
+  <tr><td>"Mantri, open the browser"</td><td>Opens your browser and says "Opening browser"</td></tr>
   <tr><td>"Hey Mantri, volume up"</td><td>Turns the volume up</td></tr>
   <tr><td>"Mantri, workspace three"</td><td>Jumps to workspace 3</td></tr>
   <tr><td>"Mantri" … <i>chime</i> … "what time is it"</td><td>Says "It's 3:42 PM"</td></tr>
@@ -33,7 +33,7 @@ Linux setup built on Hyprland. Speech recognition runs on your own computer, so 
 goes online. It acts only on sentences that start with the word "Mantri". Status: **early**. It
 works day to day, but it understands English only and a set list of phrases.
 
-*Mantri* (मन्त्री) is Sanskrit for a king's counsellor, the role JARVIS plays for Tony Stark.
+*Mantri* (मन्त्री) is Sanskrit for a king's counsellor.
 
 ## ✨ What it does
 
@@ -56,12 +56,12 @@ Start each one with "Mantri". The phrases live in `mantri-command`, so you can a
 
 | Area | Say |
 |---|---|
-| Apps | open *app name*, open browser, open terminal, open files, open Spotify |
+| Apps | open *app name*, open browser, open terminal, open files |
 | Windows | close window, fullscreen, float, workspace *N*, move to workspace *N*, next / previous workspace |
 | Media | volume up / down, mute, play / pause, next / previous song |
 | System | brightness up / down, lock, screenshot |
 | Power (asks first) | shut down, reboot, suspend, log out |
-| Web | search for …, google …, look up … |
+| Web | search for …, look up … |
 | Questions | what time is it, what's the date, battery, are you there |
 | Help | help, what can you do |
 
@@ -140,7 +140,7 @@ flowchart LR
 - **The voice check** compares your sentence with the voices you taught it.
 - **It does not hear itself.** Sound picked up while Mantri speaks is thrown away.
 
-The full design, and why it replaced an older "Hey Jarvis" setup, is in
+The full design, and why it replaced an older wake-word setup, is in
 [docs/design.md](docs/design.md).
 
 ### Limits
@@ -160,7 +160,7 @@ The full design, and why it replaced an older "Hey Jarvis" setup, is in
   the commands run and voice-match scores. Other speech is never written down.
 - **Voiceprints** are small number files in `~/.local/share/mantri/voices/`, one per person. They
   are not recordings.
-- **Web searches** open your browser on Google, like typing the search yourself.
+- **Web searches** open a search page in your browser, like typing the search yourself.
 
 ## ❓ FAQ and troubleshooting
 
