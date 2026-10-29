@@ -23,7 +23,7 @@ Check the voice, speed and latency, then set `MANTRI_VOICE_SID` and `MANTRI_VOIC
 ## 3. Enrollment
 
 ```bash
-mantri-toggle off && mantri-enroll rajeev && mantri-toggle on
+mantri-toggle off && mantri-enroll alex && mantri-toggle on
 ```
 
 Enrollment prints a self-match score for each phrase. Expect about 0.7 or higher. A low phrase usually means noise or clipping, so redo the enrollment in a quieter moment.
